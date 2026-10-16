@@ -35,7 +35,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.prerelease && 'beta' || 'master' }}
+          ref: ${{ inputs.debug && github.ref || (inputs.prerelease && 'beta' || 'master') }}
           submodules: 'recursive'
           fetch-depth: 0
 
@@ -76,7 +76,7 @@ jobs:
           echo 'org.gradle.parallel=true' >> gradle.properties
 
           if [ "${{ inputs.debug }}" = "true" ]; then
-            CMD="./gradlew :manager:assembleDebug"
+            CMD="./gradlew :manager:testDebugUnitTest :manager:assembleDebug"
             APK_DIR="manager/build/outputs/apk/debug"
           else
             CMD="./gradlew :manager:assembleRelease"

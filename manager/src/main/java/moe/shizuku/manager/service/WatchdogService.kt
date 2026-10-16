@@ -10,7 +10,10 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -20,15 +23,47 @@ import moe.shizuku.manager.ShizukuSettings
 import moe.shizuku.manager.receiver.ShizukuReceiverStarter
 import moe.shizuku.manager.utils.SettingsPage
 import moe.shizuku.manager.utils.ShizukuStateMachine
+import rikka.shizuku.Shizuku
 import java.util.concurrent.atomic.AtomicBoolean
 
 class WatchdogService : Service() {
 
+    private val handler = Handler(Looper.getMainLooper())
+    private val recoveryThrottle = WatchdogRecoveryThrottle()
+    private val healthCheck = object : Runnable {
+        override fun run() {
+            recoverIfNecessary()
+            handler.postDelayed(this, HEALTH_CHECK_INTERVAL_MS)
+        }
+    }
+
     private val stateListener: (ShizukuStateMachine.State) -> Unit = {
         if (it == ShizukuStateMachine.State.CRASHED) {
             showCrashNotification()
-            ShizukuReceiverStarter.start(applicationContext)
+            handler.post { recoverIfNecessary() }
         }
+    }
+
+    private fun recoverIfNecessary() {
+        if (!ShizukuSettings.getWatchdog()) return
+        val state = ShizukuStateMachine.get()
+        if (state == ShizukuStateMachine.State.STOPPING) return
+
+        val alive = try {
+            Shizuku.pingBinder()
+        } catch (_: Exception) {
+            false
+        }
+        if (!recoveryThrottle.shouldRecover(
+                alive,
+                state == ShizukuStateMachine.State.STARTING,
+                SystemClock.elapsedRealtime()
+            )) return
+
+        // A restarted manager might never observe RUNNING -> CRASHED. Check
+        // the binder directly so the first check also catches a dead server.
+        ShizukuStateMachine.update()
+        ShizukuReceiverStarter.start(applicationContext)
     }
 
     override fun onCreate() {
@@ -39,6 +74,7 @@ class WatchdogService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "ACTION_STOP_SERVICE") {
+            ShizukuSettings.setWatchdog(applicationContext, false)
             stopSelf()
             return START_NOT_STICKY
         }
@@ -54,13 +90,15 @@ class WatchdogService : Service() {
                 buildNotification()
             )
         }
+        handler.removeCallbacks(healthCheck)
+        handler.post(healthCheck)
         return START_STICKY
     }
 
     override fun onDestroy() {
+        handler.removeCallbacks(healthCheck)
         ShizukuStateMachine.removeListener(stateListener)
         isRunning.set(false)
-        ShizukuSettings.setWatchdog(applicationContext, false)
         super.onDestroy()
     }
 
@@ -142,6 +180,7 @@ class WatchdogService : Service() {
     }
 
     companion object {
+        private const val HEALTH_CHECK_INTERVAL_MS = 60_000L
         private const val TAG = "ShizukuWatchdog"
         private const val NOTIFICATION_ID_WATCHDOG = 1001
         private const val NOTIFICATION_ID_CRASH = 1002
