@@ -30,6 +30,7 @@ class WatchdogService : Service() {
 
     private val handler = Handler(Looper.getMainLooper())
     private val recoveryThrottle = WatchdogRecoveryThrottle()
+    private var intentionallyStopped = false
     private val healthCheck = object : Runnable {
         override fun run() {
             recoverIfNecessary()
@@ -38,14 +39,19 @@ class WatchdogService : Service() {
     }
 
     private val stateListener: (ShizukuStateMachine.State) -> Unit = {
-        if (it == ShizukuStateMachine.State.CRASHED) {
-            showCrashNotification()
-            handler.post { recoverIfNecessary() }
+        when (it) {
+            ShizukuStateMachine.State.STOPPING -> intentionallyStopped = true
+            ShizukuStateMachine.State.RUNNING -> intentionallyStopped = false
+            ShizukuStateMachine.State.CRASHED -> {
+                showCrashNotification()
+                handler.post { recoverIfNecessary() }
+            }
+            else -> Unit
         }
     }
 
     private fun recoverIfNecessary() {
-        if (!ShizukuSettings.getWatchdog()) return
+        if (!ShizukuSettings.getWatchdog() || intentionallyStopped) return
         val state = ShizukuStateMachine.get()
         if (state == ShizukuStateMachine.State.STOPPING) return
 
@@ -62,8 +68,12 @@ class WatchdogService : Service() {
 
         // A restarted manager might never observe RUNNING -> CRASHED. Check
         // the binder directly so the first check also catches a dead server.
-        ShizukuStateMachine.update()
-        ShizukuReceiverStarter.start(applicationContext)
+        try {
+            ShizukuStateMachine.update()
+            ShizukuReceiverStarter.start(applicationContext)
+        } catch (e: Exception) {
+            Log.w(TAG, "Watchdog recovery could not be scheduled", e)
+        }
     }
 
     override fun onCreate() {
